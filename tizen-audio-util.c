@@ -3,8 +3,6 @@
  *
  * Copyright (c) 2000 - 2013 Samsung Electronics Co., Ltd. All rights reserved.
  *
- * Contact: Hyunseok Lee <hs7388.lee@samsung.com>
- *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -25,47 +23,78 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 
 #include "tizen-audio-internal.h"
 
 audio_return_t _audio_util_init (audio_mgr_t *am)
 {
-    char *card_name = 0;
-    int ret = 0;
-
-    pthread_mutex_init(&am->mixer.mutex, NULL);
-    snd_card_get_name(0, &card_name);
-    if (!card_name)
-        card_name = "default";
-    ret = snd_ctl_open(&am->mixer.mixer, card_name, 0);
-    if (ret < 0 || !am->mixer.mixer) {
-        AUDIO_LOG_ERROR("mixer_open failed");
-        return AUDIO_ERR_RESOURCE;
-    }
-
+    pthread_mutex_init(&(am->mixer.mutex), NULL);
     return AUDIO_RET_OK;
-}
+    }
 
 audio_return_t _audio_util_deinit (audio_mgr_t *am)
 {
-    pthread_mutex_destroy(&am->mixer.mutex);
-    snd_ctl_close(am->mixer.mixer);
-    am->mixer.mixer = NULL;
-
+    pthread_mutex_destroy(&(am->mixer.mutex));
     return AUDIO_RET_OK;
+}
+
+#ifdef __MIXER_PARAM_DUMP
+
+static void __dump_mixer_param(char *dump, long *param, int size)
+{
+    int i, len;
+
+    for (i = 0; i < size; i++) {
+        len = sprintf(dump, "%ld", *param);
+        if (len > 0)
+            dump += len;
+        if (i != size -1) {
+            *dump++ = ',';
+        }
+
+        param++;
+    }
+    *dump = '\0';
+}
+
+#endif
+
+audio_return_t _audio_mixer_control_set_param(audio_mgr_t *am, const char* ctl_name, snd_ctl_elem_value_t* param, int size)
+{
+    /* TODO. */
+    return AUDIO_RET_OK;
+}
+
+audio_return_t audio_mixer_control_get_value (void *userdata, const char *ctl_name, int *val)
+{
+    audio_return_t audio_ret = AUDIO_RET_OK;
+    audio_mgr_t *am = (audio_mgr_t *)userdata;
+    audio_ret = _audio_mixer_control_get_value(am, ctl_name, val);
+    return audio_ret;
 }
 
 audio_return_t _audio_mixer_control_get_value(audio_mgr_t *am, const char *ctl_name, int *val)
 {
-    audio_return_t ret = AUDIO_RET_USE_HW_CONTROL;
+    snd_ctl_t *handle;
     snd_ctl_elem_value_t *control;
     snd_ctl_elem_id_t *id;
     snd_ctl_elem_info_t *info;
     snd_ctl_elem_type_t type;
-    int count = 0, i = 0;
 
-    pthread_mutex_lock(&am->mixer.mutex);
+    int ret = 0, count = 0, i = 0;
+
+    pthread_mutex_lock(&(am->mixer.mutex));
+
+    ret = snd_ctl_open(&handle, ALSA_DEFAULT_CARD, 0);
+    if (ret < 0) {
+        AUDIO_LOG_ERROR ("snd_ctl_open error, %s\n", snd_strerror(ret));
+        pthread_mutex_unlock(&(am->mixer.mutex));
+        return AUDIO_ERR_IOCTL;
+    }
+
+    // Get Element Info
 
     snd_ctl_elem_id_alloca(&id);
     snd_ctl_elem_info_alloca(&info);
@@ -75,10 +104,9 @@ audio_return_t _audio_mixer_control_get_value(audio_mgr_t *am, const char *ctl_n
     snd_ctl_elem_id_set_name(id, ctl_name);
 
     snd_ctl_elem_info_set_id(info, id);
-    if (snd_ctl_elem_info(am->mixer.mixer, info) < 0) {
-        AUDIO_LOG_ERROR("snd_ctl_elem_info %s failed", ctl_name);
-        ret = AUDIO_ERR_IOCTL;
-        goto exit;
+    if(snd_ctl_elem_info(handle, info) < 0 ) {
+        AUDIO_LOG_ERROR ("Cannot find control element: %s\n", ctl_name);
+        goto close;
     }
     snd_ctl_elem_info_get_id(info, id);
 
@@ -87,10 +115,9 @@ audio_return_t _audio_mixer_control_get_value(audio_mgr_t *am, const char *ctl_n
 
     snd_ctl_elem_value_set_id(control, id);
 
-    if(snd_ctl_elem_read(am->mixer.mixer, control) < 0) {
+    if(snd_ctl_elem_read(handle, control) < 0) {
         AUDIO_LOG_ERROR("snd_ctl_elem_read failed \n");
-        ret = AUDIO_ERR_IOCTL;
-        goto exit;
+        goto close;
     }
 
     switch (type) {
@@ -101,31 +128,52 @@ audio_return_t _audio_mixer_control_get_value(audio_mgr_t *am, const char *ctl_n
         for (i = 0; i < count; i++)
         *val = snd_ctl_elem_value_get_integer(control, i);
         break;
+    case SND_CTL_ELEM_TYPE_ENUMERATED:
+        for (i = 0; i < count; i++)
+        *val = snd_ctl_elem_value_get_enumerated(control, i);
+        break;
     default:
         AUDIO_LOG_WARN("unsupported control element type\n");
-        ret = AUDIO_ERR_IOCTL;
-        goto exit;
+        goto close;
     }
 
-    AUDIO_LOG_DEBUG("mixer_ctl_get %s=%d success", ctl_name, *val);
+    snd_ctl_close(handle);
 
-exit:
-    pthread_mutex_unlock(&am->mixer.mutex);
+#ifdef AUDIO_DEBUG
+    AUDIO_LOG_INFO("get mixer(%s) = %d success", ctl_name, *val);
+#endif
 
-    return ret;
+    pthread_mutex_unlock(&(am->mixer.mutex));
+    return AUDIO_RET_USE_HW_CONTROL;
+
+close:
+    AUDIO_LOG_ERROR ("Error\n");
+    snd_ctl_close(handle);
+    pthread_mutex_unlock(&(am->mixer.mutex));
+    return AUDIO_ERR_UNDEFINED;
 }
 
 audio_return_t _audio_mixer_control_set_value(audio_mgr_t *am, const char *ctl_name, int val)
 {
-    audio_return_t ret = AUDIO_RET_USE_HW_CONTROL;
-    int mixer_ret = -1;
+    snd_ctl_t *handle;
     snd_ctl_elem_value_t *control;
     snd_ctl_elem_id_t *id;
     snd_ctl_elem_info_t *info;
     snd_ctl_elem_type_t type;
-    int count = 0, i = 0;
 
-    pthread_mutex_lock(&am->mixer.mutex);
+    char *card_name = NULL;
+    int ret = 0, count = 0, i = 0;
+
+    pthread_mutex_lock(&(am->mixer.mutex));
+
+    ret = snd_ctl_open(&handle, ALSA_DEFAULT_CARD, 0);
+    if (ret < 0) {
+        AUDIO_LOG_ERROR("snd_ctl_open error, card: %s: %s", card_name, snd_strerror(ret));
+        pthread_mutex_unlock(&(am->mixer.mutex));
+        return AUDIO_ERR_IOCTL;
+    }
+
+    // Get Element Info
 
     snd_ctl_elem_id_alloca(&id);
     snd_ctl_elem_info_alloca(&info);
@@ -135,10 +183,9 @@ audio_return_t _audio_mixer_control_set_value(audio_mgr_t *am, const char *ctl_n
     snd_ctl_elem_id_set_name(id, ctl_name);
 
     snd_ctl_elem_info_set_id(info, id);
-    if (snd_ctl_elem_info(am->mixer.mixer, info) < 0) {
-        AUDIO_LOG_ERROR("snd_ctl_elem_info %s failed", ctl_name);
-        ret = AUDIO_ERR_IOCTL;
-        goto exit;
+    if(snd_ctl_elem_info(handle, info) < 0 ) {
+        AUDIO_LOG_ERROR("Cannot find control element: %s", ctl_name);
+        goto close;
     }
     snd_ctl_elem_info_get_id(info, id);
 
@@ -147,7 +194,7 @@ audio_return_t _audio_mixer_control_set_value(audio_mgr_t *am, const char *ctl_n
 
     snd_ctl_elem_value_set_id(control, id);
 
-    snd_ctl_elem_read(am->mixer.mixer, control);
+    snd_ctl_elem_read(handle, control);
 
     switch (type) {
     case SND_CTL_ELEM_TYPE_BOOLEAN:
@@ -158,22 +205,153 @@ audio_return_t _audio_mixer_control_set_value(audio_mgr_t *am, const char *ctl_n
         for (i = 0; i < count; i++)
             snd_ctl_elem_value_set_integer(control, i,val);
         break;
+    case SND_CTL_ELEM_TYPE_ENUMERATED:
+        for (i = 0; i < count; i++)
+            snd_ctl_elem_value_set_enumerated(control, i,val);
+        break;
+
     default:
-        AUDIO_LOG_WARN("unsupported control element type\n");
-        ret = AUDIO_ERR_IOCTL;
-        goto exit;
+        AUDIO_LOG_WARN("unsupported control element type");
+        goto close;
     }
 
-    if (snd_ctl_elem_write(am->mixer.mixer, control) < 0) {
-        AUDIO_LOG_ERROR("snd_ctl_elem_write failed \n");
-        ret = AUDIO_ERR_IOCTL;
-        goto exit;
+    snd_ctl_elem_write(handle, control);
+
+    snd_ctl_close(handle);
+
+    AUDIO_LOG_INFO("set mixer(%s) = %d success", ctl_name, val);
+
+    pthread_mutex_unlock(&(am->mixer.mutex));
+    return AUDIO_RET_USE_HW_CONTROL;
+
+close:
+    AUDIO_LOG_ERROR("Error");
+    snd_ctl_close(handle);
+    pthread_mutex_unlock(&(am->mixer.mutex));
+    return -1;
+}
+
+audio_return_t _audio_mixer_control_set_value_string(audio_mgr_t *am, const char* ctl_name, const char* value)
+{
+    /* TODO. */
+    return AUDIO_RET_OK;
+}
+
+
+audio_return_t _audio_mixer_control_get_element(audio_mgr_t *am, const char *ctl_name, snd_hctl_elem_t **elem)
+{
+    /* TODO. */
+    return AUDIO_RET_OK;
+}
+
+
+/* Generic snd pcm interface APIs */
+audio_return_t _audio_pcm_set_hw_params(snd_pcm_t *pcm, audio_pcm_sample_spec_t *sample_spec, uint8_t *use_mmap, snd_pcm_uframes_t *period_size, snd_pcm_uframes_t *buffer_size)
+{
+    audio_return_t ret = AUDIO_RET_OK;
+    snd_pcm_hw_params_t *hwparams;
+    int err = 0;
+    int dir;
+    unsigned int val = 0;
+    snd_pcm_uframes_t _period_size = period_size ? *period_size : 0;
+    snd_pcm_uframes_t _buffer_size = buffer_size ? *buffer_size : 0;
+    uint8_t _use_mmap = use_mmap && *use_mmap;
+    uint32_t channels = 0;
+
+    snd_pcm_hw_params_alloca(&hwparams);
+
+    /* Skip parameter setting to null device. */
+    if (snd_pcm_type(pcm) == SND_PCM_TYPE_NULL)
+        return AUDIO_ERR_IOCTL;
+
+    /* Allocate a hardware parameters object. */
+    snd_pcm_hw_params_alloca(&hwparams);
+
+    /* Fill it in with default values. */
+    if(snd_pcm_hw_params_any(pcm, hwparams) < 0) {
+        AUDIO_LOG_ERROR("snd_pcm_hw_params_any() : failed! - %s\n", snd_strerror(err));
+        goto error;
     }
 
-    AUDIO_LOG_DEBUG("set_mixer %s=%d success", ctl_name, val);
+    /* Set the desired hardware parameters. */
 
-exit:
-    pthread_mutex_unlock(&am->mixer.mutex);
+    if (_use_mmap) {
 
-    return ret;
+        if (snd_pcm_hw_params_set_access(pcm, hwparams, SND_PCM_ACCESS_MMAP_INTERLEAVED) < 0) {
+
+            /* mmap() didn't work, fall back to interleaved */
+
+            if ((ret = snd_pcm_hw_params_set_access(pcm, hwparams, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) {
+                AUDIO_LOG_DEBUG("snd_pcm_hw_params_set_access() failed: %s", snd_strerror(ret));
+                goto error;
+            }
+
+            _use_mmap = 0;
+        }
+
+    } else if ((ret = snd_pcm_hw_params_set_access(pcm, hwparams, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) {
+        AUDIO_LOG_DEBUG("snd_pcm_hw_params_set_access() failed: %s", snd_strerror(ret));
+        goto error;
+    }
+    AUDIO_LOG_ERROR("setting rate - %d", sample_spec->rate);
+    err = snd_pcm_hw_params_set_rate(pcm, hwparams, sample_spec->rate, 0);
+    if (err < 0) {
+        AUDIO_LOG_ERROR("snd_pcm_hw_params_set_rate() : failed! - %s\n", snd_strerror(err));
+    }
+
+    err = snd_pcm_hw_params(pcm, hwparams);
+    if (err < 0) {
+        AUDIO_LOG_ERROR("snd_pcm_hw_params() : failed! - %s\n", snd_strerror(err));
+        goto error;
+    }
+
+    /* Dump current param */
+
+    if ((ret = snd_pcm_hw_params_current(pcm, hwparams)) < 0) {
+        AUDIO_LOG_INFO("snd_pcm_hw_params_current() failed: %s", snd_strerror(ret));
+        goto error;
+    }
+
+    if ((ret = snd_pcm_hw_params_get_period_size(hwparams, &_period_size, &dir)) < 0 ||
+        (ret = snd_pcm_hw_params_get_buffer_size(hwparams, &_buffer_size)) < 0) {
+        AUDIO_LOG_INFO("snd_pcm_hw_params_get_{period|buffer}_size() failed: %s", snd_strerror(ret));
+        goto error;
+    }
+
+    snd_pcm_hw_params_get_access(hwparams, (snd_pcm_access_t *) &val);
+    AUDIO_LOG_DEBUG("access type = %s\n", snd_pcm_access_name((snd_pcm_access_t)val));
+
+    snd_pcm_hw_params_get_format(hwparams, &sample_spec->format);
+    AUDIO_LOG_DEBUG("format = '%s' (%s)\n",
+                    snd_pcm_format_name((snd_pcm_format_t)sample_spec->format),
+                    snd_pcm_format_description((snd_pcm_format_t)sample_spec->format));
+
+    snd_pcm_hw_params_get_subformat(hwparams, (snd_pcm_subformat_t *)&val);
+    AUDIO_LOG_DEBUG("subformat = '%s' (%s)\n",
+                    snd_pcm_subformat_name((snd_pcm_subformat_t)val),
+                    snd_pcm_subformat_description((snd_pcm_subformat_t)val));
+
+    snd_pcm_hw_params_get_channels(hwparams, &channels);
+    sample_spec->channels = (uint8_t)channels;
+    AUDIO_LOG_DEBUG("channels = %d\n", sample_spec->channels);
+
+    if (buffer_size)
+        *buffer_size = _buffer_size;
+
+    if (period_size)
+        *period_size = _period_size;
+
+    if (use_mmap)
+        *use_mmap = _use_mmap;
+
+    return AUDIO_RET_OK;
+
+error:
+    return AUDIO_ERR_RESOURCE;
+}
+
+
+audio_return_t _audio_pcm_set_sw_params(snd_pcm_t *pcm, snd_pcm_uframes_t avail_min, uint8_t period_event, uint32_t start_threshold, uint32_t rate)
+{
+    return AUDIO_ERR_NOT_IMPLEMENTED;
 }

@@ -1,6 +1,6 @@
 AC_PREREQ([2.67])
 
-AC_INIT([libaudiofilters-sec], [0.1])
+AC_INIT([audio-hal-e3250], [0.1])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign])
 AC_CONFIG_HEADERS([config.h])
 
